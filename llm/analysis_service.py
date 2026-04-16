@@ -730,7 +730,17 @@ def pre_analyze_preauth_result1(apv_info:str) -> Optional[dict]:
             if chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
 
-        return json.loads(content)
+        # 验证内容是否为空或无效
+        if not content or not content.strip():
+            logging.error(f"LLM返回空内容")
+            return None
+
+        try:
+            result = json.loads(content)
+            return result
+        except json.JSONDecodeError as je:
+            logging.error(f"JSON解析失败: {je}\n内容预览: {content[:500] if len(content) > 500 else content}")
+            return None
     except Exception as e:
         logging.exception("生成预授权结果出错")
         return None

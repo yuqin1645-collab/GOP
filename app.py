@@ -144,12 +144,18 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
         pre_result1 = pre_analyze_preauth_result1(apv_info)
         print(pre_result1)
         print("第一步预分析结果")
-        # 提取 ai_result_str 中的前缀编号，如 "04"
-        ai_result_str_pre = pre_result1.get("result", "")
-        if ai_result_str_pre and " - " in ai_result_str_pre:
-            ai_result_code_pre = ai_result_str_pre.split(" - ")[0]
+        # 检查pre_result1是否为None
+        if pre_result1 is None:
+            logging.error(f"理赔 {claim.get('claim_id', 'unknown')} 的预分析结果为空，跳过预分析")
+            ai_result_str_pre = ""
+            ai_result_code_pre = ""
         else:
-            ai_result_code_pre = ai_result_str_pre
+            # 提取 ai_result_str 中的前缀编号，如 "04"
+            ai_result_str_pre = pre_result1.get("result", "")
+            if ai_result_str_pre and " - " in ai_result_str_pre:
+                ai_result_code_pre = ai_result_str_pre.split(" - ")[0]
+            else:
+                ai_result_code_pre = ai_result_str_pre
 
         # 如果预分析方法1返回的是12，则直接使用该结果
         if ai_result_code_pre == "12":
