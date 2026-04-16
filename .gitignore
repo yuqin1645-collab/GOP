@@ -1,1 +1,27 @@
+cd /app/gop
+cat > .gitignore << 'EOF'
+# 项目依赖和缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.env
+.env.*
+
+# 日志和临时文件
+*.log
+logs/
+tmp/
+temp/
+
+# 你要忽略的大文件夹（重点）
 downloads/
+data/
+*.pdf
+*.zip
+*.tar.gz
+*.mp4
+*.avi
+EOF
