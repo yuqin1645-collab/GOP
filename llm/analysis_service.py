@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 from typing import Optional
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,7 +38,7 @@ prompt_dao = PromptDAO()
 gop_config_dao = GopConfigDAO()
 
 
-def create_chat_completion(model: str, messages: list, stream: bool = False, extra_body: dict = None):
+def create_chat_completion(model: str, messages: list, stream: bool = False, extra_body: dict = None, max_retries: int = 3):
     """
     统一的消息调用函数，处理模型兼容性问题
     
@@ -45,27 +46,52 @@ def create_chat_completion(model: str, messages: list, stream: bool = False, ext
     :param messages: 消息列表
     :param stream: 是否流式输出
     :param extra_body: 额外的请求参数
+    :param max_retries: 最大重试次数（仅对429限流生效）
     :return: completion 对象
     """
-    # 只有 qwen3.5-plus 支持 enable_thinking 参数
+    import time
+    import random
+
     supports_thinking = model in ("qwen3.5-plus", MODEL_TEXT_ANALYSIS) or MODEL_TEXT_ANALYSIS in ("qwen3.5-plus", model)
     
     kwargs = {"model": model, "messages": messages, "stream": stream}
     
     if extra_body:
-        # 只有在启用 thinking 且模型支持时才传递 enable_thinking
         if "enable_thinking" in extra_body:
             if ENABLE_THINKING and supports_thinking:
                 kwargs["extra_body"] = extra_body
             else:
-                # 创建不包含 enable_thinking 的 extra_body
                 filtered_body = {k: v for k, v in extra_body.items() if k != "enable_thinking"}
                 if filtered_body:
                     kwargs["extra_body"] = filtered_body
         else:
             kwargs["extra_body"] = extra_body
     
-    return client.chat.completions.create(**kwargs)
+    # 添加429限流重试机制
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            error_msg = str(e)
+            last_error = e
+            
+            # 检测429限流错误
+            if "429" in error_msg or "limit_requests" in error_msg or "Too Many Requests" in error_msg:
+                if attempt < max_retries - 1:
+                    # 指数退避 + 随机抖动
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    logging.warning(f"API限流，将在 {wait_time:.2f} 秒后重试 (尝试 {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logging.error(f"API限流重试次数用尽，不再重试")
+            
+            # 其他错误直接抛出
+            raise
+    
+    # 如果所有重试都失败，抛出最后一次错误
+    raise last_error
 
 
 def call_dashscope_application(claim_id: str, hosp_name: str) -> Optional[str]:
@@ -211,12 +237,37 @@ def analyze_claim_info(image_url: str, model_name: str = None) -> Optional[str]:
         ]
         completion = create_chat_completion(model=model_name, messages=messages)
 
-        result = completion.choices[0].message.content
+        # 安全提取 content，避免异常
+        if not completion.choices:
+            logging.warning(f"LLM响应没有choices，图片URL: {image_url}")
+            logging.debug(f"完整响应: {completion}")
+            return None
+
+        first_choice = completion.choices[0]
+        if not hasattr(first_choice, 'message') or not first_choice.message:
+            logging.warning(f"LLM响应choices[0]没有message，图片URL: {image_url}")
+            logging.debug(f"完整响应: {completion}")
+            return None
+
+        result = first_choice.message.content
+        if not result:
+            logging.warning(f"LLM返回content为空，图片URL: {image_url}")
+            logging.debug(f"choices[0].message: {first_choice.message}")
+            return None
 
         return result
     except Exception as e:
-        logging.info(e)
-        logging.exception("分析医疗材料出错")
+        error_msg = str(e)
+        # 检测是否是内容审核失败
+        if "data_inspection_failed" in error_msg or "Input data may contain inappropriate content" in error_msg:
+            # 输入内容审核拒绝
+            logging.error(f"输入内容审核拒绝，图片URL: {image_url}")
+        elif "Output data may contain inappropriate content" in error_msg:
+            # 输出内容审核拒绝
+            logging.error(f"输出内容审核拒绝，图片URL: {image_url}")
+        else:
+            logging.info(f"分析医疗材料出错: {e}, 图片URL: {image_url}")
+            logging.exception("分析医疗材料详细异常")
         return None
 
 
@@ -251,16 +302,35 @@ def analyze_claim_info_qvq(image_url: str, model_name: str = None) -> Optional[s
 
         # 流式接收响应，只收集最终回复内容
         for chunk in completion:
-            if chunk.choices:  # 确保 choices 不为空
-                delta = chunk.choices[0].delta
-                content = delta.content
-                if content:  # 如果有内容，追加到 answer_content
-                    answer_content += content
+            if not chunk.choices:
+                logging.warning(f"QVQ流式响应chunk没有choices，图片URL: {image_url}")
+                continue
+
+            delta = chunk.choices[0].delta
+            if not delta:
+                logging.warning(f"QVQ流式响应delta为空，图片URL: {image_url}")
+                continue
+
+            content = delta.content
+            if content:  # 如果有内容，追加到 answer_content
+                answer_content += content
+
+        if not answer_content:
+            logging.warning(f"QVQ模型返回content为空，图片URL: {image_url}")
 
         return answer_content
     except Exception as e:
-        logging.info(e)
-        logging.exception("使用QVQ模型分析医疗材料出错")
+        error_msg = str(e)
+        # 检测是否是内容审核失败
+        if "data_inspection_failed" in error_msg or "Input data may contain inappropriate content" in error_msg:
+            # 输入内容审核拒绝
+            logging.error(f"QVQ输入内容审核拒绝，图片URL: {image_url}")
+        elif "Output data may contain inappropriate content" in error_msg:
+            # 输出内容审核拒绝（模型生成的回复包含敏感信息）
+            logging.error(f"QVQ输出内容审核拒绝，图片URL: {image_url}")
+        else:
+            logging.info(f"QVQ分析医疗材料出错: {e}, 图片URL: {image_url}")
+            logging.exception("QVQ分析医疗材料详细异常")
         return None
 
 
@@ -302,7 +372,15 @@ def analyze_policy_info(file_path: str, type: str) -> Optional[str]:
             )
             result = completion.choices[0].message.content
         except Exception as api_error:
-            logging.error(f"API调用失败：{api_error}")
+            error_msg = str(api_error)
+            # 检测文件损坏错误
+            if "encrypted or corrupted" in error_msg or "invalid_parameter_error" in error_msg:
+                logging.error(f"PDF文件损坏或加密，文件路径: {file_path}，错误: {api_error}")
+            # 检测内容审核错误
+            elif "data_inspection_failed" in error_msg or "inappropriate content" in error_msg.lower():
+                logging.error(f"PDF内容审核拒绝，文件路径: {file_path}")
+            else:
+                logging.error(f"API调用失败：{api_error}")
             return None
         finally:
             # 确保删除文件
@@ -735,6 +813,12 @@ def pre_analyze_preauth_result1(apv_info:str) -> Optional[dict]:
             logging.error(f"LLM返回空内容")
             return None
 
+        # 清理思考过程（think标签内容）
+        import re
+        # 移除 <think>...</think> 标签内的内容
+        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+        content = content.strip()
+
         try:
             result = json.loads(content)
             return result
@@ -947,10 +1031,20 @@ def pre_analyze_preauth_result2(hospital_info: str,amount: str,document_result: 
             if chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
 
-        return json.loads(content)
+        return json.loads(clean_json_string(content))
     except Exception as e:
         logging.exception("生成住院指征预分析结果出错")
         return None
+
+
+def clean_json_string(content: str) -> str:
+    """清理JSON字符串中的非法控制字符"""
+    if not content:
+        return content
+    # 移除无效的控制字符（换行、制表符等在字符串外的控制字符）
+    # 保留 \n, \r, \t 因为它们在JSON字符串中是合法的
+    content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', content)
+    return content
 
 
 def analyze_preauth_result(claims_info: str, claim_analysis: str, policy_analysis_tob: str, policy_analysis_prod: str,
@@ -1018,7 +1112,7 @@ def analyze_preauth_result(claims_info: str, claim_analysis: str, policy_analysi
             messages = [{"role": "user", "content": prompt}]
             completion = create_chat_completion(model=MODEL_TEXT_ANALYSIS, messages=messages)
             content = completion.choices[0].message.content
-        return json.loads(content)
+        return json.loads(clean_json_string(content))
     except Exception as e:
         logging.exception("生成预授权结果出错")
         return None

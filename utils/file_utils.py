@@ -53,11 +53,48 @@ def download_file(url: str, save_dir: str = "downloads", custom_filename: str = 
     try:
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
+            content_length = r.headers.get('Content-Length', '未知')
+            logging.info(f"下载文件: {url}, 预期大小: {content_length} bytes")
             with open(save_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-        logging.info(f"文件已保存至：{save_path}")
+        
+        actual_size = os.path.getsize(save_path)
+        logging.info(f"文件已保存至：{save_path}, 实际大小: {actual_size} bytes")
+        
+        if actual_size == 0:
+            logging.warning(f"下载的文件为空，URL: {url}")
         return save_path
     except Exception as e:
         logging.error(f"下载文件失败：{url}, 错误：{e}")
         return None
+
+
+def cleanup_downloaded_files(save_dir: str = "downloads", keep_count: int = 50):
+    """
+    清理downloads目录中的旧文件，只保留最新的N个文件
+    
+    Args:
+        save_dir: 目录路径
+        keep_count: 保留的最新文件数量，默认50
+    """
+    try:
+        dir_path = Path(save_dir)
+        if not dir_path.exists():
+            return
+        
+        # 获取所有文件，按修改时间排序
+        files = sorted(dir_path.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
+        
+        # 如果文件数量超过阈值，删除旧文件
+        if len(files) > keep_count:
+            for file in files[keep_count:]:
+                try:
+                    file.unlink()
+                    logging.debug(f"已清理旧文件：{file.name}")
+                except Exception as e:
+                    logging.warning(f"清理文件失败：{file}, 错误：{e}")
+            
+            logging.info(f"清理完成，已删除 {len(files) - keep_count} 个旧文件")
+    except Exception as e:
+        logging.warning(f"清理downloads目录失败：{e}")

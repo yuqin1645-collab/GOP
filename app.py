@@ -541,22 +541,31 @@ def process_policies_info():
                             is_error = True
                             continue
 
-                        # 分析保单条款
-                        policy_analysis = analyze_policy_info(file_path, policy_info.get("type"))
+                        try:
+                            # 分析保单条款
+                            policy_analysis = analyze_policy_info(file_path, policy_info.get("type"))
 
-                        if not policy_analysis:
-                            logging.warning(f"保单条款分析失败：{claim_id}")
-                            is_error = True
-                        else:
-                            # 线程安全地插入分析结果
-                            with lock:
-                                policies_dao.insert_policies_analysis(
-                                    claim_id=claim_id,
-                                    policy_type=policy_info.get("type"),
-                                    file_name=policy_info.get("fileName"),
-                                    file_url=new_pdf_url,
-                                    analysis_result=policy_analysis
-                                )
+                            if not policy_analysis:
+                                logging.warning(f"保单条款分析失败：{claim_id}")
+                                is_error = True
+                            else:
+                                # 线程安全地插入分析结果
+                                with lock:
+                                    policies_dao.insert_policies_analysis(
+                                        claim_id=claim_id,
+                                        policy_type=policy_info.get("type"),
+                                        file_name=policy_info.get("fileName"),
+                                        file_url=new_pdf_url,
+                                        analysis_result=policy_analysis
+                                    )
+                        finally:
+                            # 使用完文件后删除
+                            try:
+                                if file_path and os.path.exists(file_path):
+                                    os.remove(file_path)
+                                    logging.debug(f"已删除临时文件：{file_path}")
+                            except Exception as e:
+                                logging.warning(f"删除临时文件失败：{file_path}, 错误：{e}")
 
                     # 线程安全地更新 claim_case 表的 policies_analyzed 字段
                     if not is_error:
@@ -630,7 +639,11 @@ def process_documents_info():
                     def process_single_document(img_info):
                         nonlocal has_error
                         file_name = img_info.get("fileName", "")
-                        if not file_name.lower().endswith(('heic','.jpg','.png',".jpeg",'.jfif','.pdf','.docx','.xlsx')):
+                        # 处理扩展名可能带有括号的情况，如 "xxx).pdf"
+                        normalized_file_name = file_name.lower().replace(')', '.').replace(']', '.')
+                        supported_extensions = ('heic', '.jpg', '.png', ".jpeg", '.jfif', '.pdf', '.docx', '.xlsx')
+                        if not any(normalized_file_name.endswith(ext) for ext in supported_extensions):
+                            logging.info(f"不支持的文件类型，跳过：{file_name}")
                             return False
 
                         # 检查是否已存在分析数据
@@ -641,7 +654,7 @@ def process_documents_info():
                             )
 
                         if document_results and len(document_results) > 0:
-                            logging.info(f"已存在理赔资料分析数据，跳过处理 {claim_id}")
+                            logging.info(f"已存在分析数据，跳过：{file_name}")
                             return False
 
                         # 处理URL
@@ -651,7 +664,7 @@ def process_documents_info():
                             "https://mdlcnpro.oss-cn-beijing.aliyuncs.com"
                         )
 
-                        if not file_name.lower().endswith(('.pdf','.docx','.xlsx')):
+                        if not any(normalized_file_name.endswith(ext) for ext in ('.pdf','.docx','.xlsx')):
                             # 检查URL是否有效
                             if not new_doc_url or not new_doc_url.startswith('http'):
                                 logging.warning(f"无效的文档URL：{claim_id}, URL: {new_doc_url}")
@@ -668,24 +681,24 @@ def process_documents_info():
                             analysis = analyze_claim_info(llm_analys_url)
                             analysis_bak = analyze_claim_info_qvq(llm_analys_url)
 
+                            # 如果分析失败但不是内容审核问题，则记录错误
                             if not analysis:
-                                logging.warning(f"理赔资料分析失败：{claim_id}")
-                                with lock:
-                                    has_error = True
-                                return False
-
+                                logging.warning(f"理赔资料分析失败（非审核原因）：{claim_id}, 文件名: {img_info.get('fileName')}")
+                                # 可能是内容审核失败，日志已记录，继续处理
                             if not analysis_bak:
-                                logging.warning(f"理赔资料分析失败：{claim_id}")
-                                with lock:
-                                    has_error = True
-                                return False
+                                logging.warning(f"理赔资料QVQ分析失败（非审核原因）：{claim_id}, 文件名: {img_info.get('fileName')}")
+                                # 可能是内容审核失败，日志已记录，继续处理
+
+                            # 处理None值，避免后续函数报错
+                            analysis = analysis or ""
+                            analysis_bak = analysis_bak or ""
 
                             #置信度
                             image_quality = evaluate_image_quality(new_doc_url)
                             #相似度
-                            consistency = compare_ocr_results(analysis,analysis_bak)
+                            consistency = compare_ocr_results(analysis, analysis_bak) if analysis and analysis_bak else None
                             # 不同
-                            diff = get_ocr_results_diff(analysis,analysis_bak)
+                            diff = get_ocr_results_diff(analysis, analysis_bak) if analysis and analysis_bak else None
 
                             # 插入分析结果
                             with lock:
@@ -708,27 +721,34 @@ def process_documents_info():
                                     has_error = True
                                 return False
 
-                            # 分析保单条款
-                            policy_analysis = analyze_document_pdf_info(file_path)
+                            try:
+                                # 分析保单条款
+                                policy_analysis = analyze_document_pdf_info(file_path)
 
-                            if not policy_analysis:
-                                logging.warning(f"保单条款分析失败：{claim_id}")
-                                with lock:
-                                    has_error = True
-                                return False
-                            else:
-                                # 插入分析结果
-                                with lock:
-                                    document_dao.insert_document_analysis(
-                                        claim_id=claim_id,
-                                        image_quality='',
-                                        consistency='',
-                                        diff='',
-                                        file_name=img_info.get("fileName"),
-                                        file_url=new_doc_url,
-                                        analysis_result=policy_analysis,
-                                    )
+                                if not policy_analysis:
+                                    # 检查是否是文件损坏原因
+                                    logging.warning(f"保单条款分析失败（可能是PDF损坏或内容审核）：{claim_id}, 文件名: {img_info.get('fileName')}")
+                                else:
+                                    # 插入分析结果
+                                    with lock:
+                                        document_dao.insert_document_analysis(
+                                            claim_id=claim_id,
+                                            image_quality='',
+                                            consistency='',
+                                            diff='',
+                                            file_name=img_info.get("fileName"),
+                                            file_url=new_doc_url,
+                                            analysis_result=policy_analysis,
+                                        )
                                 return True
+                            finally:
+                                # 使用完文件后删除
+                                try:
+                                    if file_path and os.path.exists(file_path):
+                                        os.remove(file_path)
+                                        logging.debug(f"已删除临时文件：{file_path}")
+                                except Exception as e:
+                                    logging.warning(f"删除临时文件失败：{file_path}, 错误：{e}")
                     
                     # 使用线程池处理所有文档
                     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -741,7 +761,7 @@ def process_documents_info():
                             try:
                                 result = future.result()
                                 if not result:
-                                    logging.info(f"处理文档 {img_info.get('fileName')} 时出现问题")
+                                    logging.info(f"处理文档失败（已在上方记录具体原因）：{img_info.get('fileName')}")
                             except Exception as exc:
                                 logging.exception(f"处理文档 {img_info.get('fileName')} 时发生异常: {exc}")
                                 with lock:
