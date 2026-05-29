@@ -4,12 +4,20 @@ import logging.handlers
 import os
 from dotenv import load_dotenv
 
+from pathlib import Path
+
 load_dotenv()
 
-LOG_DIR = os.getenv("GOP_LOG_FILE")
-os.makedirs(LOG_DIR, exist_ok=True)
+# 使用 GOP_LOG_DIR 环境变量，默认使用项目下的 logs 目录
+# Path().resolve() 确保路径标准化，自动清理双斜杠等不规范写法
+_log_dir_str = os.getenv("GOP_LOG_DIR", "").strip()
+if _log_dir_str:
+    LOG_DIR = Path(_log_dir_str)
+else:
+    LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 
-LOG_FILE = os.path.join(LOG_DIR, "app.log")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = str(LOG_DIR / "app.log")
 
 def setup_logger():
     logger = logging.getLogger()
@@ -23,21 +31,6 @@ def setup_logger():
             LOG_FILE, when="midnight", backupCount=30, encoding="utf-8", delay=True, utc=False
         )
         file_handler.setLevel(logging.INFO)
-
-        # 添加处理程序获取/释放锁的函数以支持多进程
-        def emit_and_release_lock(self, record):
-            """
-            在写入日志后释放文件锁，以支持多进程环境
-            """
-            try:
-                logging.handlers.TimedRotatingFileHandler.emit(self, record)
-            finally:
-                self.stream.flush()
-                os.fsync(self.stream.fileno())
-        
-        # 将自定义方法绑定到file_handler
-        import types
-        file_handler.emit = types.MethodType(emit_and_release_lock, file_handler)
 
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)

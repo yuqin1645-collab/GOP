@@ -18,7 +18,8 @@ from utils.api_utils import (
 from llm.analysis_service import analyze_claim_info, analyze_policy_info, analyze_preauth_result, \
     analyze_claim_info_qvq, call_dashscope_application, cut_document_info, \
     analyze_document_pdf_info, analyze_diag_type, get_except_info, get_apv_info, analyze_cpt, \
-    pre_analyze_preauth_result1, get_inpatient_info, pre_analyze_preauth_result2, pre_analyze_policy_exceptinfo
+    pre_analyze_preauth_result1, get_inpatient_info, pre_analyze_preauth_result2, pre_analyze_policy_exceptinfo, \
+    ENABLE_QVQ_CROSS_CHECK
 from utils.email_utils import EmailSender
 from utils.dao_context import dao_context
 
@@ -37,6 +38,7 @@ load_dotenv()
 logging = logger.setup_logger()
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB 请求体上限
 
 
 # ========== 公共函数模块 ==========
@@ -67,7 +69,7 @@ def process_claim_re_init(claim_info,claim_dao,basic_info_dao):
     claim_dao.reset_claim_case_for_review(claim_id=claim_id)
     basic_info_dao.delete_basic_info_analysis(claim_id)
 
-def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, policies_dao,provider_dao):
+def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, policies_dao, provider_dao, lock=None):
     claim_id = claim['claim_id']
     gop_type = claim['gop_type']
     provider_name = claim['provider_name']
@@ -95,14 +97,6 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
 
     # 是否除外治疗，药品
     except_result = get_except_info(document_result, claim['query_details'])
-
-    # cpt
-    # if claim['cpt']:
-    #     cpt_list = get_cpt_data_as_json()
-    #     cpt = analyze_cpt(document_result, claim['diangosis'], cpt_list)
-    #     cpt = cpt.get("cpt", "")
-    # else:
-    #     cpt = claim['cpt']
 
     # 获取保单条款分析结果
     policy_entitys_tob = policies_dao.get_policies_analysis_by_id(claim_id,"tob")
@@ -142,8 +136,7 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
     if gop_type == "" or gop_type is None or gop_type == "hospital":
         # 首先尝试使用预分析方法1（基于apv_info）
         pre_result1 = pre_analyze_preauth_result1(apv_info)
-        print(pre_result1)
-        print("第一步预分析结果")
+        logging.debug(f"第一步预分析结果: {pre_result1}")
         # 检查pre_result1是否为None
         if pre_result1 is None:
             logging.error(f"理赔 {claim.get('claim_id', 'unknown')} 的预分析结果为空，跳过预分析")
@@ -162,9 +155,7 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
             preauth_result = pre_result1
         else:
             pre_result2 = pre_analyze_preauth_result2(hospital_info.to_json(),claim['amount'],document_result,str(policy_except_info))
-            # print("*"*50)
-            print(pre_result2)
-            print("第二步预分析结果")
+            logging.debug(f"第二步预分析结果: {pre_result2}")
             # 检查pre_result2是否为None
             if pre_result2 is None:
                 # 如果预分析方法2失败，则直接生成完整的预授权结果
@@ -173,7 +164,7 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
                     price_knowledge_base, admission_type, prod_type, hospital_info.to_json(), except_result,
                     apv_info, inpatient_info, claim['query_details'], claim['reco_benfit']
                 )
-                print("第三步预分析结果")
+                logging.info("第三步预分析结果（预分析方法2失败，调用完整分析）")
             else:
                 # 提取 ai_result_str 中的前缀编号
                 ai_result_str_pre2 = pre_result2.get("result", "")
@@ -187,7 +178,7 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
                     preauth_result = pre_result2
                 else:
                     # 生成完整的预授权结果
-                    print("第四步预分析结果")
+                    logging.info("第四步预分析结果（预分析方法2返回非13，调用完整分析）")
                     preauth_result = analyze_preauth_result(
                         basic_info_result, document_result, policy_result_tob, policy_result_prod, str(gop_type),
                         price_knowledge_base, admission_type, prod_type, hospital_info.to_json(), except_result,
@@ -195,7 +186,7 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
                     )
     else:
         # 生成预授权结果
-        print("第五步预分析结果")
+        logging.info("第五步预分析结果（非 hospital 类型，调用完整分析）")
         preauth_result = analyze_preauth_result(
             basic_info_result, document_result, policy_result_tob,
             policy_result_prod, str(gop_type),
@@ -205,8 +196,8 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
         )
 
     str_preauth_result = str(preauth_result)
-    print("preauth_result:",preauth_result)
-    print(str_preauth_result)
+    logging.debug(f"preauth_result: {preauth_result}")
+    logging.debug(str_preauth_result)
 
     #格式化result
     if preauth_result is not None:
@@ -227,9 +218,15 @@ def process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, polic
         ai_reason = preauth_result.get("reason", "")
     else:
         ai_reason = ""
-    claim_dao.update_claim_case(claim_id, diag_type=diag_type, preauth_status=1, preauth_result=str_preauth_result,
-                                ai_result=ai_result_code, ai_result_desc=ai_result_str,old_preauth_result=old_preauth_result,
-                                ai_reason=ai_reason, update_time=None)
+    if lock:
+        with lock:
+            claim_dao.update_claim_case(claim_id, diag_type=diag_type, preauth_status=1, preauth_result=str_preauth_result,
+                                        ai_result=ai_result_code, ai_result_desc=ai_result_str, old_preauth_result=old_preauth_result,
+                                        ai_reason=ai_reason, update_time=None)
+    else:
+        claim_dao.update_claim_case(claim_id, diag_type=diag_type, preauth_status=1, preauth_result=str_preauth_result,
+                                    ai_result=ai_result_code, ai_result_desc=ai_result_str, old_preauth_result=old_preauth_result,
+                                    ai_reason=ai_reason, update_time=None)
     logging.info(f"Processed claim {claim_id} successfully")
 
     return preauth_result
@@ -320,13 +317,7 @@ def gen_pre_auth_result():
                 return jsonify({"status": "success", "message": "所有理赔申请处理完成,数量为0"}), 200
 
             logging.info(f"Found {len(completed_claims)} completed claims to process")
-            # path = os.getenv("EXCEL_PATH") + get_file_name_csv()
-            # with open(path, "w", encoding="utf-8", newline="") as f:
-            #     writer = csv.writer(f)
-            #     writer.writerow(["ClaimId", "Result", "Reason"])
 
-
-            new_completed_claims = []
             for claim in completed_claims:
                 try:
                     logging.info(f"Deal {claim['claim_id']} ")
@@ -347,17 +338,10 @@ def gen_pre_auth_result():
                         logging.error(f"update preauth result failed，状态码：{response.status_code},返回码：{response.json().get("returnCode")}")
                         continue
 
-                    # with open(path, "a", encoding="utf-8", newline="") as f:
-                    #     writer = csv.writer(f)
-                    #     writer.writerow([claim['claim_id'], result.get("result"), result.get("reason")])
-                    #new_completed_claims.append(claim)
                 except Exception as e:
                     claim_dao.update_claim_case(claim['claim_id'], preauth_status=0, preauth_result="")
                     logging.exception("Error processing claims: "+claim['claim_id'])
                     continue
-
-            #email_sender = EmailSender()
-            #email_sender.send_email(claim_ids=new_completed_claims, attachment_path=path)
 
     except Exception as e:
         logging.exception("Error processing claims")
@@ -385,29 +369,31 @@ def gen_pre_auth_result_multi_thread():
             
             # 定义处理单个理赔案件的函数
             def process_single_claim(claim):
+                claim_id = claim['claim_id']
                 try:
-                    logging.info(f"Deal {claim['claim_id']} ")
-                    result = process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, policies_dao, provider_dao)
+                    logging.info(f"Deal {claim_id} ")
+                    result = process_claim_analysis(claim, claim_dao, basic_info_dao, document_dao, policies_dao, provider_dao, lock)
 
                     #预授权结果更新到eccs上
                     url = os.getenv("updatePreAuthResultUrl")
                     headers = {"Content-Type": "application/json"}
                     # 准备请求数据
                     data = {
-                        "claimsId": claim['claim_id'],
+                        "claimsId": claim_id,
                         "preAuthReason": result.get("reason", ""),
                         "preAuthResult": result.get("result", "")
                     }
                     response = requests.post(url, headers=headers, data=json.dumps(data))
 
                     if response.status_code != 200 and response.json().get("returnCode") != "0000":
-                        logging.error(f"update preauth result failed，状态码：{response.status_code},返回码：{response.json().get("returnCode")}")
+                        logging.error(f"update preauth result failed，状态码：{response.status_code},返回码：{response.json().get('returnCode')}")
                         return False
 
                     return True
                 except Exception as e:
-                    claim_dao.update_claim_case(claim['claim_id'], preauth_status=0, preauth_result="")
-                    logging.exception("Error processing claims: "+claim['claim_id'])
+                    with lock:
+                        claim_dao.update_claim_case(claim_id, preauth_status=0, preauth_result="")
+                    logging.exception("Error processing claims: "+claim_id)
                     return False
             
             # 使用线程池处理所有理赔案件
@@ -679,7 +665,11 @@ def process_documents_info():
 
                             # 分析理赔资料
                             analysis = analyze_claim_info(llm_analys_url)
-                            analysis_bak = analyze_claim_info_qvq(llm_analys_url)
+                            # QVQ 交叉验证（可通过环境变量关闭以节省 API 成本）
+                            if ENABLE_QVQ_CROSS_CHECK:
+                                analysis_bak = analyze_claim_info_qvq(llm_analys_url)
+                            else:
+                                analysis_bak = None
 
                             # 如果分析失败但不是内容审核问题，则记录错误
                             if not analysis:
@@ -713,15 +703,15 @@ def process_documents_info():
                                 )
                             return True
                         else:
-                            file_path = download_file(new_doc_url,custom_filename=get_file_name_by_original_name(img_info.get("fileName")))
-
-                            if not file_path:
-                                logging.warning(f"下载保单文件失败：{claim_id}")
-                                with lock:
-                                    has_error = True
-                                return False
-
+                            file_path = None
                             try:
+                                file_path = download_file(new_doc_url, custom_filename=get_file_name_by_original_name(img_info.get("fileName")))
+                                if not file_path:
+                                    logging.warning(f"下载保单文件失败：{claim_id}")
+                                    with lock:
+                                        has_error = True
+                                    return False
+
                                 # 分析保单条款
                                 policy_analysis = analyze_document_pdf_info(file_path)
 
@@ -785,19 +775,30 @@ def process_documents_info():
 def processProviderInfo():
     try:
         providers = request.get_json(force=True)
-        print(providers)
+        if not isinstance(providers, list):
+            return jsonify({"error": "请求体必须为数组格式"}), 400
+
         for provider in providers:
-            # 去除providerCode前后的空格
+            if not isinstance(provider, dict):
+                logging.warning(f"跳过非字典格式的provider数据: {type(provider)}")
+                continue
+
             provider_code = provider.get("providerCode", "").strip()
+            if not provider_code:
+                logging.warning("跳过缺少providerCode的记录")
+                continue
+            if len(provider_code) > 100:
+                logging.warning(f"providerCode长度超限，跳过: {provider_code[:20]}...")
+                continue
+
             with dao_context() as (_, _, _, _, provider_dao):
                 existing_provider = provider_dao.get_provider_by_code(provider_code)
                 if not existing_provider:
-                    print(provider.get("longName", ""))
-                    # 如果供应商不存在，则插入新记录
+                    logging.info(f"新增医疗机构: {provider.get('longName', '')} ({provider_code})")
                     provider_dao.insert_provider(
                         provider_code=provider_code,
-                        provider_name=provider.get("longName", ""),
-                        provider_type=provider.get("providerType", ""),
+                        provider_name=str(provider.get("longName", ""))[:200],
+                        provider_type=str(provider.get("providerType", ""))[:50],
                         gop_white_list="Y"
                     )
     except Exception as e:
@@ -810,9 +811,19 @@ def processProviderInfo():
 def processBlackListMemberInfo():
     try:
         blacks = request.get_json(force=True)
+        if not isinstance(blacks, list):
+            return jsonify({"error": "请求体必须为数组格式"}), 400
+
         for black in blacks:
-            # 去除providerCode前后的空格
+            if not isinstance(black, dict):
+                logging.warning(f"跳过非字典格式的黑名单数据: {type(black)}")
+                continue
+
             black_id = black.get("id", "")
+            if not black_id:
+                logging.warning("跳过缺少id的黑名单记录")
+                continue
+
             black_list_member_dao = BlacklistMemberDAO()
             existing_provider = black_list_member_dao.get_blacklist_member_by_id(black_id)
             if existing_provider:
@@ -820,17 +831,17 @@ def processBlackListMemberInfo():
 
             black_list_member_dao.insert_blacklist_member(
                 id=black_id,
-                name=black.get("name", ""),
-                id_type=black.get("idType", ""),
-                new_ic=black.get("newIc", ""),
-                tel_mobile=black.get("telMobile", ""),
-                remark=black.get("remark", ""),
-                remove_remark=black.get("removeRemark", ""),
-                source=black.get("source", ""),
-                status=black.get("status", ""),
-                create_by=black.get("createBy", ""),
-                update_by=black.get("updateBy", ""),
-                black_types=black.get("blackTypes", "")
+                name=str(black.get("name", ""))[:200],
+                id_type=str(black.get("idType", ""))[:50],
+                new_ic=str(black.get("newIc", ""))[:50],
+                tel_mobile=str(black.get("telMobile", ""))[:50],
+                remark=str(black.get("remark", ""))[:500],
+                remove_remark=str(black.get("removeRemark", ""))[:500],
+                source=str(black.get("source", ""))[:50],
+                status=str(black.get("status", ""))[:20],
+                create_by=str(black.get("createBy", ""))[:50],
+                update_by=str(black.get("updateBy", ""))[:50],
+                black_types=str(black.get("blackTypes", ""))[:100]
             )
 
     except Exception as e:
@@ -1033,4 +1044,5 @@ def process_cpt_codes():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode)

@@ -34,28 +34,32 @@ MODEL_LONG_DOCUMENT = os.getenv("MODEL_LONG_DOCUMENT", "qwen-long-latest")
 # 是否启用思考模式（部分模型不支持）
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
 
+# 是否启用 QVQ 模型交叉验证（设为 false 可节省 API 成本）
+ENABLE_QVQ_CROSS_CHECK = os.getenv("ENABLE_QVQ_CROSS_CHECK", "true").lower() == "true"
+
 prompt_dao = PromptDAO()
 gop_config_dao = GopConfigDAO()
 
 
-def create_chat_completion(model: str, messages: list, stream: bool = False, extra_body: dict = None, max_retries: int = 3):
+def create_chat_completion(model: str, messages: list, stream: bool = False, extra_body: dict = None, max_retries: int = 5, timeout: int = 120):
     """
     统一的消息调用函数，处理模型兼容性问题
-    
+
     :param model: 模型名称
     :param messages: 消息列表
     :param stream: 是否流式输出
     :param extra_body: 额外的请求参数
-    :param max_retries: 最大重试次数（仅对429限流生效）
+    :param max_retries: 最大重试次数（仅对429限流和超时错误生效）
+    :param timeout: 请求超时时间（秒），默认 120 秒
     :return: completion 对象
     """
     import time
     import random
 
     supports_thinking = model in ("qwen3.5-plus", MODEL_TEXT_ANALYSIS) or MODEL_TEXT_ANALYSIS in ("qwen3.5-plus", model)
-    
-    kwargs = {"model": model, "messages": messages, "stream": stream}
-    
+
+    kwargs = {"model": model, "messages": messages, "stream": stream, "timeout": timeout}
+
     if extra_body:
         if "enable_thinking" in extra_body:
             if ENABLE_THINKING and supports_thinking:
@@ -66,8 +70,8 @@ def create_chat_completion(model: str, messages: list, stream: bool = False, ext
                     kwargs["extra_body"] = filtered_body
         else:
             kwargs["extra_body"] = extra_body
-    
-    # 添加429限流重试机制
+
+    # 添加429限流和超时重试机制
     last_error = None
     for attempt in range(max_retries):
         try:
@@ -75,21 +79,30 @@ def create_chat_completion(model: str, messages: list, stream: bool = False, ext
         except Exception as e:
             error_msg = str(e)
             last_error = e
-            
-            # 检测429限流错误
-            if "429" in error_msg or "limit_requests" in error_msg or "Too Many Requests" in error_msg:
+
+            # 检测429限流错误或超时错误
+            is_retryable = (
+                "429" in error_msg or
+                "limit_requests" in error_msg or
+                "Too Many Requests" in error_msg or
+                "Request timed out" in error_msg or
+                "timeout" in error_msg.lower() or
+                "Read timed out" in error_msg
+            )
+
+            if is_retryable:
                 if attempt < max_retries - 1:
                     # 指数退避 + 随机抖动
                     wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logging.warning(f"API限流，将在 {wait_time:.2f} 秒后重试 (尝试 {attempt + 1}/{max_retries})")
+                    logging.warning(f"API错误（限流或超时），将在 {wait_time:.2f} 秒后重试 (尝试 {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
                     continue
                 else:
-                    logging.error(f"API限流重试次数用尽，不再重试")
-            
+                    logging.error(f"API错误重试次数用尽，不再重试")
+
             # 其他错误直接抛出
             raise
-    
+
     # 如果所有重试都失败，抛出最后一次错误
     raise last_error
 
@@ -120,7 +133,7 @@ def call_dashscope_application(claim_id: str, hosp_name: str) -> Optional[str]:
         completion = create_chat_completion(model=MODEL_TEXT_ANALYSIS, messages=messages)
         content = completion.choices[0].message.content
 
-        print(content)
+        logging.debug(f"DashScope Application 返回内容: {content}")
 
         # 检查LLM返回的内容
         if not content:

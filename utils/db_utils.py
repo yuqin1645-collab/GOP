@@ -17,8 +17,9 @@ def create_connection_pool():
             database=os.getenv('DB_NAME'),
             charset='utf8mb4',
             cursorclass=pymysql.cursors.DictCursor,
-            maxconnections=10,
-            blocking=True
+            maxconnections=25,
+            blocking=True,
+            timeout=30
         )
         return pool
     except Exception as e:
