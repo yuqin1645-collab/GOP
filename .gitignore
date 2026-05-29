@@ -1,22 +1,24 @@
-cd /app/gop
-cat > .gitignore << 'EOF'
+# Python virtual environments
+myenv/
+venv/
+.venv/
+
 # 项目依赖和缓存
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-venv/
-.venv/
 .env
 .env.*
 
 # 日志和临时文件
 *.log
 logs/
+GopLogs/
 tmp/
 temp/
 
-# 你要忽略的大文件夹（重点）
+# 大文件
 downloads/
 data/
 *.pdf
@@ -24,7 +26,3 @@ data/
 *.tar.gz
 *.mp4
 *.avi
-EOF
-D:/GopLogs/
-GopLogs/
-logs/
