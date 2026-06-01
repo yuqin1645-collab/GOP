@@ -172,7 +172,7 @@ def gen_pre_auth_result_multi_thread():
                     logging.exception("Error processing claims: " + claim_id)
                     return False
             
-            max_workers = 20
+            max_workers = 3
             success_count = 0
             failed_count = 0
             

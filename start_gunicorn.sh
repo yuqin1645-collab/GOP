@@ -5,7 +5,7 @@ PROJECT_DIR="/app/gop"
 VENV_DIR="$PROJECT_DIR/myenv"
 LOG_DIR="/applog/gop/logs"
 PORT=5000
-WORKERS=10
+WORKERS=3
 TIMEOUT=598
 
 # 日志文件
@@ -36,6 +36,7 @@ gunicorn \
     -w "$WORKERS" \
     -b "0.0.0.0:$PORT" \
     --timeout "$TIMEOUT" \
+    --preload \
     --access-logfile "$ACCESS_LOG" \
     --error-logfile "$ERROR_LOG" \
     --pid "$PID_FILE" \

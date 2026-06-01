@@ -354,7 +354,7 @@ class ClaimService:
                 claim_id, img_info, document_dao, lock
             )
         
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_img = {
                 executor.submit(process_single_document, img_info): img_info 
                 for img_info in document_info
