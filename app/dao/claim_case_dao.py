@@ -104,7 +104,7 @@ class ClaimCaseDAO(BaseDAO):
                   AND c.documents_analyzed = 1
                   AND c.policies_analyzed = 1
                   AND c.preauth_status = '0'
-                  AND c.provider_name not like '赫康%'
+                  AND c.provider_name not like '赫康%%'
                   AND c.admission_date >= CURDATE()
                 """
         return self._fetch_all(query)
