@@ -31,12 +31,14 @@ cd "$PROJECT_DIR" || { echo "无法进入项目目录: $PROJECT_DIR"; exit 1; }
 
 # 启动 Gunicorn
 echo "启动 Gunicorn: 0.0.0.0:$PORT"
+PID_FILE="/tmp/gunicorn_gop.pid"
 gunicorn \
     -w "$WORKERS" \
     -b "0.0.0.0:$PORT" \
     --timeout "$TIMEOUT" \
     --access-logfile "$ACCESS_LOG" \
     --error-logfile "$ERROR_LOG" \
+    --pid "$PID_FILE" \
     --daemon \
     app:app
 
